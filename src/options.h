@@ -67,6 +67,7 @@ struct Options : Limits {
   // such as memory and file descriptors. The next request for a repo that's been closed is much
   // slower than for a repo that hasn't been. Negative value means infinity.
   Duration repo_ttl = std::chrono::seconds(3600);
+  const char* socket_path = nullptr;
 };
 
 Options ParseOptions(int argc, char** argv);

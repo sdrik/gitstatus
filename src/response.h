@@ -29,7 +29,7 @@ namespace gitstatus {
 
 class ResponseWriter {
  public:
-  ResponseWriter(std::string request_id);
+  ResponseWriter(std::string request_id, int fd);
   ResponseWriter(ResponseWriter&&) = delete;
   ~ResponseWriter();
 
@@ -43,6 +43,7 @@ class ResponseWriter {
   bool done_ = false;
   std::string request_id_;
   std::ostringstream strm_;
+  int fd_;
 };
 
 }  // namespace gitstatus

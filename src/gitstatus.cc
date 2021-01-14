@@ -15,10 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with GitStatus. If not, see <https://www.gnu.org/licenses/>.
 
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <cstddef>
 #include <future>
+#include <list>
 #include <string>
 
 #include <git2.h>
@@ -41,11 +48,11 @@ namespace {
 
 using namespace std::string_literals;
 
-void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
+void ProcessRequest(const Options& opts, RepoCache& cache, Request req, int fd) {
   Timer timer;
   ON_SCOPE_EXIT(&) { timer.Report("request"); };
 
-  ResponseWriter resp(req.id);
+  ResponseWriter resp(req.id, fd);
   Repo* repo = cache.Open(req.dir, req.from_dotgit);
   if (!repo) return;
 
@@ -170,12 +177,35 @@ void ProcessRequest(const Options& opts, RepoCache& cache, Request req) {
   resp.Dump("with git status");
 }
 
+int MakeSocket(const char* socket_path) {
+  int fd;
+  struct sockaddr_un addr;
+
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
+
+  unlink(socket_path);
+  CHECK((fd = socket(AF_UNIX, SOCK_STREAM, 0)) != -1) << Errno();
+  CHECK(bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != -1) << Errno();
+  CHECK(listen(fd, 5) != -1) << Errno();
+
+  return fd;
+}
+
+bool IsLockedFd(int fd) {
+  CHECK(fd >= 0);
+  struct flock flock = {};
+  flock.l_type = F_RDLCK;
+  flock.l_whence = SEEK_SET;
+  CHECK(fcntl(fd, F_GETLK, &flock) != -1) << Errno();
+  return flock.l_type != F_UNLCK;
+}
+
 int GitStatus(int argc, char** argv) {
   tzset();
   Options opts = ParseOptions(argc, argv);
   g_min_log_level = opts.log_level;
   for (int i = 0; i != argc; ++i) LOG(INFO) << "argv[" << i << "]: " << Print(argv[i]);
-  RequestReader reader(fileno(stdin), opts.lock_fd, opts.parent_pid);
   RepoCache cache(opts);
 
   InitGlobalThreadPool(opts.num_threads);
@@ -185,18 +215,83 @@ int GitStatus(int argc, char** argv) {
   git_libgit2_opts(GIT_OPT_DISABLE_READNG_PACKED_TAGS, 1);
   git_libgit2_init();
 
+  int listenfd = -1, n;
+  fd_set active_fds, read_fds;
+  struct timeval timeout;
+  bool monitor = opts.lock_fd >= 0 || opts.parent_pid >= 0;
+  std::list<std::unique_ptr<RequestReader>> readers;
+
+  FD_ZERO(&active_fds);
+
+  if (opts.socket_path) {
+    listenfd = MakeSocket(opts.socket_path);
+    FD_SET(listenfd, &active_fds);
+  } else {
+    int fd = fileno(stdin);
+    FD_SET(fd, &active_fds);
+    CHECK(fd != opts.lock_fd);
+    readers.emplace_front(new RequestReader(fd));
+  }
+
+  if (monitor) {
+    timeout = {.tv_sec = 1};
+  }
+
   while (true) {
     try {
-      Request req;
-      if (reader.ReadRequest(req)) {
-        LOG(INFO) << "Processing request: " << req;
-        try {
-          ProcessRequest(opts, cache, req);
-          LOG(INFO) << "Successfully processed request: " << req;
-        } catch (const Exception&) {
-          LOG(ERROR) << "Error processing request: " << req;
+      read_fds = active_fds;
+      CHECK((n = select(FD_SETSIZE, &read_fds, NULL, NULL, monitor ? &timeout : NULL)) >= 0)
+          << Errno();
+      if (n == 0) {
+        if (opts.lock_fd >= 0 && !IsLockedFd(opts.lock_fd)) {
+          LOG(INFO) << "Lock on fd " << opts.lock_fd << " is gone. Exiting.";
+          std::exit(0);
         }
-      } else if (opts.repo_ttl >= Duration()) {
+        if (opts.parent_pid >= 0 && kill(opts.parent_pid, 0)) {
+          LOG(INFO) << "Unable to send signal 0 to " << opts.parent_pid << ". Exiting.";
+          std::exit(0);
+        }
+        timeout = {.tv_sec = 1};
+        continue;
+      }
+      if (opts.socket_path && FD_ISSET(listenfd, &read_fds)) {
+        // New incoming connection
+        int fd;
+        VERIFY((fd = accept(listenfd, NULL, NULL)) >= 0) << Errno();
+        FD_SET(fd, &active_fds);
+        readers.emplace_front(new RequestReader(fd));
+        LOG(INFO) << "Accepted new connection: " << fd;
+      }
+      auto it = readers.begin();
+      while (it != readers.end()) {
+        int fd = (*it)->fd();
+        if (FD_ISSET(fd, &read_fds)) {
+          // Data available
+          Request req;
+          if ((*it)->ReadRequest(req)) {
+            LOG(INFO) << "Processing request: " << req;
+            try {
+              ProcessRequest(opts, cache, req, fd);
+              LOG(INFO) << "Successfully processed request: " << req;
+            } catch (const Exception&) {
+              LOG(ERROR) << "Error processing request: " << req;
+            }
+          } else if ((*it)->eof()) {
+            if (opts.socket_path) {
+              LOG(INFO) << "EOF. Closing connection.";
+              FD_CLR(fd, &active_fds);
+              close(fd);
+              it = readers.erase(it);
+              continue;  // iterator already moved
+            } else {
+              LOG(INFO) << "EOF. Exiting.";
+              std::exit(0);
+            }
+          }
+        }
+        ++it;
+      }
+      if (opts.repo_ttl >= Duration()) {
         cache.Free(Clock::now() - opts.repo_ttl);
       }
     } catch (const Exception&) {

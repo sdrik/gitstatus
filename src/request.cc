@@ -17,10 +17,6 @@
 
 #include "request.h"
 
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/select.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -57,15 +53,6 @@ Request ParseRequest(const std::string& s) {
   return res;
 }
 
-bool IsLockedFd(int fd) {
-  CHECK(fd >= 0);
-  struct flock flock = {};
-  flock.l_type = F_RDLCK;
-  flock.l_whence = SEEK_SET;
-  CHECK(fcntl(fd, F_GETLK, &flock) != -1) << Errno();
-  return flock.l_type != F_UNLCK;
-}
-
 }  // namespace
 
 std::ostream& operator<<(std::ostream& strm, const Request& req) {
@@ -75,56 +62,26 @@ std::ostream& operator<<(std::ostream& strm, const Request& req) {
   return strm;
 }
 
-RequestReader::RequestReader(int fd, int lock_fd, int parent_pid)
-    : fd_(fd), lock_fd_(lock_fd), parent_pid_(parent_pid) {
-  CHECK(fd != lock_fd);
-}
+RequestReader::RequestReader(int fd) : fd_(fd) {}
 
 bool RequestReader::ReadRequest(Request& req) {
-  auto eol = std::find(read_.begin(), read_.end(), kMsgSep);
-  if (eol != read_.end()) {
-    std::string msg(read_.begin(), eol);
-    read_.erase(read_.begin(), eol + 1);
+  char buf[256];
+  int n;
+  VERIFY((n = read(fd_, buf, sizeof(buf))) >= 0) << Errno();
+  LOG(INFO) << "read(" << n << ") = '" << buf << "'";
+  if (n == 0) {
+    eof_ = true;
+    return false;
+  }
+  read_.insert(read_.end(), buf, buf + n);
+  int eol = std::find(buf, buf + n, kMsgSep) - buf;
+  if (eol != n) {
+    std::string msg(read_.begin(), read_.end() - (n - eol));
+    read_.erase(read_.begin(), read_.begin() + msg.size() + 1);
     req = ParseRequest(msg);
     return true;
   }
-
-  char buf[256];
-  while (true) {
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(fd_, &fds);
-    struct timeval timeout = {.tv_sec = 1};
-
-    int n;
-    CHECK((n = select(fd_ + 1, &fds, NULL, NULL, &timeout)) >= 0) << Errno();
-    if (n == 0) {
-      if (lock_fd_ >= 0 && !IsLockedFd(lock_fd_)) {
-        LOG(INFO) << "Lock on fd " << lock_fd_ << " is gone. Exiting.";
-        std::exit(0);
-      }
-      if (parent_pid_ >= 0 && kill(parent_pid_, 0)) {
-        LOG(INFO) << "Unable to send signal 0 to " << parent_pid_ << ". Exiting.";
-        std::exit(0);
-      }
-      req = {};
-      return false;
-    }
-
-    CHECK((n = read(fd_, buf, sizeof(buf))) >= 0) << Errno();
-    if (n == 0) {
-      LOG(INFO) << "EOF. Exiting.";
-      std::exit(0);
-    }
-    read_.insert(read_.end(), buf, buf + n);
-    int eol = std::find(buf, buf + n, kMsgSep) - buf;
-    if (eol != n) {
-      std::string msg(read_.begin(), read_.end() - (n - eol));
-      read_.erase(read_.begin(), read_.begin() + msg.size() + 1);
-      req = ParseRequest(msg);
-      return true;
-    }
-  }
+  return false;
 }
 
 }  // namespace gitstatus

@@ -35,13 +35,14 @@ std::ostream& operator<<(std::ostream& strm, const Request& req);
 
 class RequestReader {
  public:
-  RequestReader(int fd, int lock_fd, int parent_pid);
+  RequestReader(int fd);
   bool ReadRequest(Request& req);
+  int fd() const { return fd_; };
+  bool eof() const { return eof_; };
 
  private:
   int fd_;
-  int lock_fd_;
-  int parent_pid_;
+  bool eof_ = false;
   std::deque<char> read_;
 };
 

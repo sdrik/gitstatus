@@ -254,10 +254,11 @@ Options ParseOptions(int argc, char** argv) {
                                 {"ignore-status-show-untracked-files", no_argument, nullptr, 'U'},
                                 {"ignore-bash-show-untracked-files", no_argument, nullptr, 'W'},
                                 {"ignore-bash-show-dirty-state", no_argument, nullptr, 'D'},
+                                {"socket-path", required_argument, nullptr, 'S'},
                                 {}};
   Options res;
   while (true) {
-    switch (getopt_long(argc, argv, "hVG:l:p:t:v:r:s:u:c:d:m:eUWD", opts, nullptr)) {
+    switch (getopt_long(argc, argv, "hVG:l:p:t:v:r:s:u:c:d:m:eUWDS:", opts, nullptr)) {
       case -1:
         if (optind != argc) {
           std::cerr << "unexpected positional argument: " << argv[optind] << std::endl;
@@ -332,6 +333,9 @@ Options ParseOptions(int argc, char** argv) {
         break;
       case 'D':
         res.ignore_bash_show_dirty_state = true;
+        break;
+      case 'S':
+        res.socket_path = optarg;
         break;
       default:
         std::exit(10);

@@ -17,6 +17,8 @@
 
 #include "response.h"
 
+#include <unistd.h>
+
 #include <cctype>
 #include <cstring>
 #include <iostream>
@@ -39,7 +41,9 @@ void SafePrint(std::ostream& strm, StringView s) {
 
 }  // namespace
 
-ResponseWriter::ResponseWriter(std::string request_id) : request_id_(std::move(request_id)) {
+ResponseWriter::ResponseWriter(std::string request_id, int fd)
+    : request_id_(std::move(request_id)), fd_(fd) {
+  fd_ = (fd == fileno(stdin)) ? fileno(stdout) : fd;
   SafePrint(strm_, request_id_);
   Print(1);
 }
@@ -67,7 +71,8 @@ void ResponseWriter::Dump(const char* log) {
   CHECK(!done_);
   done_ = true;
   LOG(INFO) << "Replying " << log;
-  std::cout << strm_.str() << kMsgSep << std::flush;
+  strm_ << kMsgSep;
+  write(fd_, strm_.str().c_str(), strm_.str().length());
 }
 
 }  // namespace gitstatus
