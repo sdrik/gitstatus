@@ -54,6 +54,7 @@
 autoload -Uz add-zsh-hook        || return
 zmodload zsh/datetime zsh/system || return
 zmodload -F zsh/files b:zf_rm    || return
+[[ -n $GITSTATUS_SOCKET_PATH ]] && { zmodload zsh/net/socket || return }
 
 typeset -g _gitstatus_plugin_dir"${1:-}"="${${(%):-%x}:A:h}"
 
@@ -612,7 +613,12 @@ function gitstatus_start"${1:-}"() {
             exec {fd} >&-                                            || return
           }
         else
-          sysopen -r -o cloexec -u resp_fd <(_gitstatus_daemon$fsuf) || return
+          if [[ -n $GITSTATUS_SOCKET_PATH ]]; then
+            zsocket $GITSTATUS_SOCKET_PATH || return
+            resp_fd=$REPLY
+          else
+            sysopen -r -o cloexec -u resp_fd <(_gitstatus_daemon$fsuf) || return
+          fi
         fi
 
         typeset -gi GITSTATUS_DAEMON_PID_$name="${sysparams[procsubstpid]:--1}"
@@ -625,15 +631,19 @@ function gitstatus_start"${1:-}"() {
       if (( ! async )); then
         (( _GITSTATUS_CLIENT_PID_$name == sysparams[pid] )) || return
 
-        local pgid
-        while (( $#pgid < 20 )); do
-          [[ -t $resp_fd ]]
-          sysread -s $((20 - $#pgid)) -t $timeout -i $resp_fd 'pgid[$#pgid+1]' || return
-        done
-        [[ $pgid == ' '#<1-> ]] || return
-        typeset -gi GITSTATUS_DAEMON_PID_$name=pgid
+        if [[ -n $GITSTATUS_SOCKET_PATH ]]; then
+          req_fd=${(P)${:-_GITSTATUS_RESP_FD_$name}}
+        else
+          local pgid
+          while (( $#pgid < 20 )); do
+            [[ -t $resp_fd ]]
+            sysread -s $((20 - $#pgid)) -t $timeout -i $resp_fd 'pgid[$#pgid+1]' || return
+          done
+          [[ $pgid == ' '#<1-> ]] || return
+          typeset -gi GITSTATUS_DAEMON_PID_$name=pgid
 
-        sysopen -w -o cloexec -u req_fd -- $file_prefix.fifo || return
+          sysopen -w -o cloexec -u req_fd -- $file_prefix.fifo || return
+        fi
         [[ $req_fd == <1-> ]]                                || return
         typeset -gi _GITSTATUS_REQ_FD_$name=req_fd
 
@@ -849,7 +859,7 @@ function gitstatus_stop"${1:-}"() {
   [[ $file_prefix == /*   ]] && zf_rm -f -- $file_prefix.lock $file_prefix.fifo
   [[ $lock_fd     == <1-> ]] && zsystem flock -u $lock_fd
   [[ $req_fd      == <1-> ]] && exec {req_fd}>&-
-  [[ $resp_fd     == <1-> ]] && exec {resp_fd}>&-
+  [[ $resp_fd     == <1-> ]] && [[ $resp_fd != $req_fd ]] && exec {resp_fd}>&-
 
   unset $state_var $req_fd_var $lock_fd_var $resp_fd_var $client_pid_var $daemon_pid_var
   unset $inflight_var $file_prefix_var $dirty_max_index_size_var
