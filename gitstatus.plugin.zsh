@@ -541,7 +541,7 @@ function gitstatus_start"${1:-}"() {
     return 1
   fi
 
-  local -i lock_fd resp_fd stderr_fd
+  local -i lock_fd resp_fd req_fd stderr_fd
   local file_prefix xtrace=/dev/null daemon_log=/dev/null culprit
 
   {
